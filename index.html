@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>成人俄语 0→1 学习辅助系统</title>
+<meta name="description" content="成人零基础俄语（A1→A2）学习辅助系统：考点库、复习计划、思维导图、背诵打卡、口语练习、听力训练、字母与键盘。" />
+<link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="logo">РУ</div>
+      <div>
+        <div class="t">成人俄语 0→1</div>
+        <div class="s">学习辅助系统 v1.0</div>
+      </div>
+    </div>
+    <div id="nav"></div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="btn ghost sm menu-toggle" id="menuBtn">☰</button>
+      <div>
+        <h1 id="pageTitle">系统概览</h1>
+        <div class="crumb" id="pageCrumb">成人零基础俄语 · A1→A2</div>
+      </div>
+      <div class="mlauto" id="topActions"></div>
+    </div>
+    <div class="content" id="view"></div>
+  </div>
+</div>
+<div id="modalRoot"></div>
+<div id="backdrop" class="backdrop hidden" onclick="App.closeSidebar()"></div>
+
+<script src="assets/js/data.js"></script>
+<script src="assets/js/data2.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
