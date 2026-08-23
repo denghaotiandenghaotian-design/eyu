@@ -41,12 +41,20 @@ if(window.speechSynthesis){
   speechSynthesis.onvoiceschanged = loadVoices;            // 桌面/移动端异步就绪回调
   let _vt = 0;                                             // iOS/部分安卓首帧拿不到，轮询兜底
   const _vtimer = setInterval(()=>{ loadVoices(); if(_voicesReady || ++_vt > 20) clearInterval(_vtimer); }, 250);
+  // iOS 解锁：首次用户手势内预热语音引擎(空朗读+立即取消)，规避后续 speak 静默
+  window.addEventListener('click', function _unlock(){
+    try{ const u=new SpeechSynthesisUtterance(''); u.volume=0; speechSynthesis.speak(u); speechSynthesis.cancel(); }catch(e){}
+    loadVoices();
+    window.removeEventListener('click', _unlock);
+  }, {passive:true});
 }
 
 // 真正发声：始终显式指定 lang，并在有俄语音色时强制绑定 voice
+// 关键：移动端(尤其 iOS)必须在用户手势【同步调用栈】内完成 speak 才会真正发声；
+//       异步回调里的 cancel+speak 会被静默吞掉，故此处【默认不 cancel】，靠引擎排队处理连点。
+// 兜底：onstart 未在 900ms 内触发(=引擎静默/无语音数据) → 走在线音频 _fallbackAudio。
 function _doSpeak(text, lang){
   try{
-    speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = lang; u.rate = 0.82; u.pitch = 1;             // 显式语言，杜绝依赖设备系统语言
     const two = lang.slice(0,2).toLowerCase();
@@ -60,7 +68,29 @@ function _doSpeak(text, lang){
       const v = _voices.find(x=>x.lang && x.lang.toLowerCase().indexOf(two)===0);
       if(v) u.voice = v;
     }
+    let started = false;
+    const timer = setTimeout(()=>{ if(!started) _fallbackAudio(text, lang); }, 900);
+    u.onstart = ()=>{ started = true; clearTimeout(timer); };
+    u.onerror = ()=>{ clearTimeout(timer); _fallbackAudio(text, lang); };
     speechSynthesis.speak(u);
+  }catch(e){ _fallbackAudio(text, lang); }
+}
+// 在线音频兜底：Web Speech 引擎失效(安卓无 TTS 数据/微信内核)时自动播放。
+// 单词/无空格短语 → 有道词典俄语发音(国内可达)；长句 → 给出可执行引导。
+function _fallbackAudio(text, lang){
+  try{
+    if(typeof Audio === 'undefined') return;
+    const s = String(text==null?'':text);
+    if(!s) return;
+    if(/[\u4e00-\u9fa5]/.test(s)) return;                  // 含中文不播，避免读错
+    if(/\s/.test(s) || s.length > 40){                     // 含空格/超长 → 无在线句库，引导
+      if(typeof toast === 'function') toast('本机语音引擎不可用：请用 Chrome/系统浏览器打开本页；或在系统「文字转语音(TTS)」下载俄语语音后重试。');
+      return;
+    }
+    const url = 'https://dict.youdao.com/dictvoice?type=2&audio=' + encodeURIComponent(s);
+    const a = new Audio(url);
+    a.volume = 1;
+    a.play().catch(function(){ if(typeof toast === 'function') toast('无法播放语音，请检查手机是否静音。'); });
   }catch(e){}
 }
 // 统一清洗待朗读文本：去教学重音符(组合字符)+剔除混入的中文，避免引擎降级或读出中文
@@ -73,10 +103,14 @@ function ttsClean(text){
 }
 function speak(text, lang){
   if(!window.speechSynthesis){ return; }
+  // 微信 / 部分 WebView 的 Web Speech 常被禁用，给出可执行提示
+  if(/micromessenger/i.test(navigator.userAgent || '')){
+    if(typeof toast === 'function') toast('检测到微信内置浏览器，可能无法发音。请点右上角 ⋮ →「在浏览器中打开」后用系统浏览器发音。');
+  }
   lang = lang || 'ru-RU';
   if(lang.slice(0,2).toLowerCase()==='ru'){ text = ttsClean(text); if(!text) return; }
   if(!_voicesReady) loadVoices();                          // 点击时同步补拉(不脱离用户手势，iOS 友好)
-  _doSpeak(text, lang);                                    // 立即在手势内发声
+  _doSpeak(text, lang);                                    // 立即在手势内发声(不 cancel，确保出声)
   // 若俄语音色此刻尚未就绪：等 voiceschanged 后用真正的俄语音色补读一次(主要惠及安卓首次点击)
   if(lang.slice(0,2).toLowerCase()==='ru' && !_ruVoice && !_voicesReady){
     const once = ()=>{ speechSynthesis.removeEventListener('voiceschanged', once); loadVoices(); if(_ruVoice) _doSpeak(text, lang); };
