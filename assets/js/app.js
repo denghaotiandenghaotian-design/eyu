@@ -14,21 +14,74 @@ function norm(s){ return (s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace
 function lsGet(k, d){ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):(d||null); }catch(e){ return d||null; } }
 function lsSet(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
 
-/* 语音合成 */
-let _voices=[];
-function loadVoices(){ if(window.speechSynthesis) _voices = speechSynthesis.getVoices()||[]; }
-if(window.speechSynthesis){ speechSynthesis.onvoiceschanged = loadVoices; loadVoices(); }
-function speak(text, lang){
-  if(!window.speechSynthesis){ return; }
-  lang = lang || 'ru-RU';
+/* 语音合成 —— 统一强制俄语(ru-RU)，修复移动端回退到系统默认语言(普通话)的问题
+   根因：①手机 getVoices() 异步返回，首次点击时音色列表常为空 → 没绑定俄语音色
+        →引擎仅凭 u.lang 在移动端不可靠(“认 voice 不认 lang”)，回退系统默认语言(中文手机=普通话)。
+   对策：健壮加载音色 + 强制绑定俄语 voice + 音色就绪后补读 + 无俄语音色时提示安装。 */
+let _voices = [];
+let _ruVoice = null;      // 缓存选定的俄语音色
+let _voicesReady = false; // 音色列表是否已真正加载
+let _noRuWarned = false;  // 无俄语音色的提示只弹一次
+
+// 按优先级挑选俄语音色：精确 ru-RU → 任意 ru-* → 名称含 Russian/Русск
+function pickRuVoice(){
+  if(!_voices || !_voices.length) return null;
+  return _voices.find(v=>v.lang && v.lang.toLowerCase()==='ru-ru')
+      || _voices.find(v=>v.lang && v.lang.toLowerCase().indexOf('ru')===0)
+      || _voices.find(v=>/russ|русск/i.test(v.name||''))
+      || null;
+}
+function loadVoices(){
+  if(!window.speechSynthesis) return;
+  const list = speechSynthesis.getVoices() || [];
+  if(list.length){ _voices = list; _voicesReady = true; _ruVoice = pickRuVoice(); }
+}
+if(window.speechSynthesis){
+  loadVoices();
+  speechSynthesis.onvoiceschanged = loadVoices;            // 桌面/移动端异步就绪回调
+  let _vt = 0;                                             // iOS/部分安卓首帧拿不到，轮询兜底
+  const _vtimer = setInterval(()=>{ loadVoices(); if(_voicesReady || ++_vt > 20) clearInterval(_vtimer); }, 250);
+}
+
+// 真正发声：始终显式指定 lang，并在有俄语音色时强制绑定 voice
+function _doSpeak(text, lang){
   try{
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = lang; u.rate = 0.82; u.pitch = 1;
-    const v = _voices.find(x=>x.lang && x.lang.toLowerCase().indexOf(lang.toLowerCase().slice(0,2))===0);
-    if(v) u.voice = v;
+    u.lang = lang; u.rate = 0.82; u.pitch = 1;             // 显式语言，杜绝依赖设备系统语言
+    const two = lang.slice(0,2).toLowerCase();
+    if(two === 'ru'){
+      if(_ruVoice){ u.voice = _ruVoice; }                  // 关键：移动端认 voice 不认 lang
+      else if(_voicesReady && !_noRuWarned){                // 设备确实没有俄语语音包
+        _noRuWarned = true;
+        if(typeof toast === 'function') toast('本设备未安装俄语语音包，发音可能不准。请到系统「文字转语音 / 朗读内容」中添加俄语(Русский)语音后重试。');
+      }
+    } else {
+      const v = _voices.find(x=>x.lang && x.lang.toLowerCase().indexOf(two)===0);
+      if(v) u.voice = v;
+    }
     speechSynthesis.speak(u);
   }catch(e){}
+}
+// 统一清洗待朗读文本：去教学重音符(组合字符)+剔除混入的中文，避免引擎降级或读出中文
+function ttsClean(text){
+  return String(text==null?'':text)
+    .normalize('NFC')
+    .replace(/[\u0300-\u036f]/g, '')      // 组合重音符(如 кни́га → книга)
+    .replace(/[\u4e00-\u9fa5]+/g, ' ')    // 兜底剔除中文，杜绝俄语音色念汉字
+    .replace(/\s+/g, ' ').trim();
+}
+function speak(text, lang){
+  if(!window.speechSynthesis){ return; }
+  lang = lang || 'ru-RU';
+  if(lang.slice(0,2).toLowerCase()==='ru'){ text = ttsClean(text); if(!text) return; }
+  if(!_voicesReady) loadVoices();                          // 点击时同步补拉(不脱离用户手势，iOS 友好)
+  _doSpeak(text, lang);                                    // 立即在手势内发声
+  // 若俄语音色此刻尚未就绪：等 voiceschanged 后用真正的俄语音色补读一次(主要惠及安卓首次点击)
+  if(lang.slice(0,2).toLowerCase()==='ru' && !_ruVoice && !_voicesReady){
+    const once = ()=>{ speechSynthesis.removeEventListener('voiceschanged', once); loadVoices(); if(_ruVoice) _doSpeak(text, lang); };
+    speechSynthesis.addEventListener('voiceschanged', once, {once:true});
+  }
 }
 function spk(text, label){ label = label||'🔊'; return '<span class="speak" data-act="speak" data-t="'+encodeURIComponent(text)+'">'+label+'</span>'; }
 function spkWord(text){ return '<span class="speak" data-act="speak" data-t="'+encodeURIComponent(text)+'">🔊</span>'; }
@@ -1228,6 +1281,57 @@ function calcStreak(dates){
   return streak;
 }
 
+/* ---------- 语音诊断（排查"手机读中文"用）---------- */
+function voiceDiag(){
+  loadVoices();
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/i.test(ua);
+  const isWeixin = /MicroMessenger/i.test(ua);
+  const ruList = _voices.filter(v=>v.lang && v.lang.toLowerCase().indexOf('ru')===0);
+
+  let status;
+  if(!window.speechSynthesis){
+    status = '<div class="note warn"><b>❌ 当前浏览器不支持语音合成</b><br>请改用 Chrome / Edge / Safari 打开。</div>';
+  } else if(!_voicesReady){
+    status = '<div class="note warn"><b>⏳ 音色列表尚未加载完成</b><br>请稍等 1–2 秒后重新打开本面板。</div>';
+  } else if(ruList.length){
+    status = '<div class="note ok"><b>✅ 已检测到俄语音色，发音正常</b><br>当前使用：<code>'+esc(_ruVoice?_ruVoice.name:'-')+'</code>（'+esc(_ruVoice?_ruVoice.lang:'-')+'）</div>';
+  } else {
+    status = '<div class="note warn"><b>⚠️ 本设备未安装俄语(ru-RU)语音包</b><br>这正是"手机点击发音变成普通话"的根本原因：系统没有俄语音色时，TTS 引擎会退回默认的中文语音去念西里尔字母。按下方指引安装俄语语音后即可恢复。</div>';
+  }
+
+  const guide = isIOS
+    ? '<b>iPhone / iPad：</b>设置 → 辅助功能 → 朗读内容 → 声音 → <b>Русский（俄语）</b> → 下载任一音色 → 回到本页刷新'
+    : isAndroid
+      ? '<b>Android：</b>设置 → 系统 → 语言和输入法 → <b>文字转语音(TTS)</b> → 首选引擎选 <b>Google 文字转语音</b> → 安装语音数据 → 勾选 <b>Русский</b> → 回到本页刷新<br><span class="tiny muted">注：国产 ROM 默认的中文 TTS 引擎多数不含俄语，需改用 Google TTS 引擎。</span>'
+      : '<b>Windows：</b>设置 → 时间和语言 → 语言和区域 → 添加语言 <b>Русский</b> → 勾选"语音"组件 → 重启浏览器<br><b>macOS：</b>系统设置 → 辅助功能 → 朗读内容 → 系统声音 → 管理声音 → 俄语';
+
+  const wxNote = isWeixin ? '<div class="note info">📱 你正在<b>微信内置浏览器</b>中打开。微信 WebView 对语音合成支持不完整，建议点击右上角「…」→ <b>在浏览器中打开</b>，再使用发音功能。</div>' : '';
+
+  const listHtml = _voices.length
+    ? '<table class="tbl"><tr><th>语言代码</th><th>音色名称</th><th>本地</th></tr>'
+      + _voices.slice().sort((a,b)=>String(a.lang).localeCompare(String(b.lang)))
+          .map(v=>'<tr'+(v.lang&&v.lang.toLowerCase().indexOf('ru')===0?' style="background:rgba(226,162,82,.16);font-weight:600"':'')
+            +'><td>'+esc(v.lang||'-')+'</td><td>'+esc(v.name||'-')+'</td><td>'+(v.localService?'✔':'云端')+'</td></tr>').join('')
+      + '</table>'
+    : '<div class="tiny muted">未获取到任何音色。</div>';
+
+  modal('<h3 style="margin-top:0">🔊 语音诊断</h3>'
+    + wxNote + status
+    + '<div class="row mt12"><button class="btn gold sm" data-act="speak" data-t="'+encodeURIComponent('Здравствуйте! Я учу русский язык.')+'">▶ 试听俄语</button>'
+    + '<button class="btn ghost sm" data-act="voiceDiag">🔄 重新检测</button></div>'
+    + '<div class="mt16"><b>设备可用音色（共 '+_voices.length+' 个，俄语已高亮）</b>'
+    + '<div style="max-height:230px;overflow:auto" class="mt8">'+listHtml+'</div></div>'
+    + '<div class="note info mt12">'+guide+'</div>'
+    + '<div class="row mt12" style="justify-content:flex-end"><button class="btn soft sm" onclick="App.closeModal()">关闭</button></div>');
+}
+// 顶栏常驻入口（手机端也可见）
+(function(){
+  const bar = document.getElementById('topActions');
+  if(bar) bar.innerHTML = '<button class="btn ghost sm" data-act="voiceDiag" title="发音不对？点此诊断">🔊 语音诊断</button>';
+})();
+
 /* 全局点击委托 */
 document.addEventListener('click', e=>{
   const t=e.target.closest('[data-act]'); if(!t) return;
@@ -1245,7 +1349,7 @@ document.getElementById('menuBtn') && document.getElementById('menuBtn').addEven
 
 /* 暴露 API */
 window.App = {
-  go, closeModal, closeSidebar, speak,
+  go, closeModal, closeSidebar, speak, voiceDiag,
   m1Search, m1Apply, m1detail, m1Import, m1ShowUserVocab,
   m2Gen, m2Save, m2Progress, m2Sprint,
   m4Tab, toggleCheck, m4Flash, m4Checkin,
