@@ -6,6 +6,18 @@
 <title>成人俄语 0→1 学习辅助系统</title>
 <meta name="description" content="成人零基础俄语（A1→A2）学习辅助系统：考点库、复习计划、思维导图、背诵打卡、口语练习、听力训练、字母与键盘。" />
 <link rel="stylesheet" href="assets/css/style.css" />
+<style>
+/* 进入系统闸门：保证浏览器自动播放策略下，用户手势内触发欢迎语发音 */
+#enterGate{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,#0d1b3e 0%,#16213e 60%,#1d2b50 100%);font-family:system-ui,"Microsoft YaHei",sans-serif}
+#enterGate .box{text-align:center;color:#fff;padding:24px}
+#enterGate .ru{font-size:52px;font-weight:700;letter-spacing:3px}
+#enterGate .sub{color:#e2a252;font-size:18px;margin:10px 0 30px}
+#enterGate .enter{background:#e2a252;color:#16213e;border:none;padding:14px 42px;font-size:18px;font-weight:700;
+  border-radius:30px;cursor:pointer;box-shadow:0 8px 24px rgba(226,162,82,.42);transition:transform .12s}
+#enterGate .enter:active{transform:scale(.96)}
+#enterGate .tip{color:#9fb0d0;font-size:13px;margin-top:18px;line-height:1.6}
+</style>
 </head>
 <body>
 <div class="layout">
@@ -35,8 +47,19 @@
 <div id="modalRoot"></div>
 <div id="backdrop" class="backdrop hidden" onclick="App.closeSidebar()"></div>
 
+<!-- 进入系统闸门：点击「进入系统」后自动朗读欢迎语（预生成音频，无需设备语音包） -->
+<div id="enterGate">
+  <div class="box">
+    <div class="ru">РУССКИЙ</div>
+    <div class="sub">成人零基础俄语 · A1→A2 学习系统</div>
+    <button id="enterBtn" class="enter">🚪 进入系统</button>
+    <div class="tip">点击进入后将自动朗读欢迎语<br>（预生成音频，无需安装设备语音包）</div>
+  </div>
+</div>
+
 <script src="assets/js/data.js"></script>
 <script src="assets/js/data2.js"></script>
+<script src="assets/audio/ru/index.js"></script>
 <script src="assets/js/app.js"></script>
 </body>
 </html>
