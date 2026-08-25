@@ -93,29 +93,108 @@ function _fallbackAudio(text, lang){
     a.play().catch(function(){ if(typeof toast === 'function') toast('无法播放语音，请检查手机是否静音。'); });
   }catch(e){}
 }
-// 统一清洗待朗读文本：去教学重音符(组合字符)+剔除混入的中文，避免引擎降级或读出中文
-function ttsClean(text){
+// 与音频生成脚本(extract_texts.js / gen_audio.py)保持一致的清洗：去组合重音 + 去中日韩 + 折叠空白
+function cleanForAudio(text){
   return String(text==null?'':text)
     .normalize('NFC')
-    .replace(/[\u0300-\u036f]/g, '')      // 组合重音符(如 кни́га → книга)
-    .replace(/[\u4e00-\u9fa5]+/g, ' ')    // 兜底剔除中文，杜绝俄语音色念汉字
-    .replace(/\s+/g, ' ').trim();
+    .replace(/[̀-ͯ]/g, '')                                       // 组合重音符 U+0300-036F
+    .replace(/[一-鿿　-〿＀-￯]/g, ' ')                   // CJK + 全角标点
+    .replace(/\s+/g, ' ')
+    .trim();
 }
+function ttsClean(text){ return cleanForAudio(text); }   // 向后兼容别名
+var WELCOME_RU = 'Здравствуйте! Добро пожаловать в систему изучения русского языка.';
+
+// 紧凑 SHA-1(与生成端 Python sha1 对齐，用于预生成音频文件查找)
+function sha1hex(s){
+  function f(n){ return (n<16?'0':'') + n.toString(16); }
+  function R(n,c){ return (n<<c)|(n>>>(32-c)); }
+  function ch(n,x,y,z){ return (n&x)^((~n)&z); }
+  function pa(n,x,y,z){ return (n&y)^((~y)&z); }
+  function maj(n,x,y,z){ return (n&y)^(n&z)^(x&z); }
+  function s0(n){ return R(n,2)^R(n,13)^R(n,22); }
+  function s1(n){ return R(n,6)^R(n,11)^R(n,25); }
+  function g0(x){ return R(x,7)^R(x,18)^(x>>>3); }
+  function g1(x){ return R(x,17)^R(x,19)^(x>>>10); }
+  var H=[0x67452301,0xefcdab89,0x98badcfe,0x10325476,0xc3d2e1f0];
+  var m=unescape(encodeURIComponent(s)), p=[], i, w=[80], a,b,c,d,e,fl,k,t;
+  for(i=0;i<m.length;i+=1){ p[i>>2]=(p[i>>2]||0)|(m.charCodeAt(i)<<((3-(i%4))*8)); }
+  p[p.length]=0x80; while(p.length%16!==14){ p.push(0); } p.push((m.length*8)>>>0); p.push(Math.floor((m.length*8)/Math.pow(2,32))>>>0);
+  for(i=0;i<p.length;i+=16){
+    for(var j=0;j<80;j+=1){ w[j]=(j<16)?p[i+j]:(g1(w[j-2])+w[j-7]+g0(w[j-15])+w[j-16])>>>0; }
+    a=H[0];b=H[1];c=H[2];d=H[3];e=H[4];
+    for(j=0;j<80;j+=1){
+      if(j<20){ fl=ch(j,a,b,c);k=0x5a827999; } else if(j<40){ fl=pa(j,a,b,c);k=0x6ed9eba1; }
+      else if(j<60){ fl=maj(j,a,b,c);k=0x8f1bbcdc; } else { fl=pa(j,a,b,c);k=0xca62c1d6; }
+      t=(R(a,5)+fl+e+k+w[j])>>>0; e=d; d=c; c=R(b,30)>>>0; b=a; a=t;
+    }
+    H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0; H[4]=(H[4]+e)>>>0;
+  }
+  return f(H[0])+f(H[1])+f(H[2])+f(H[3])+f(H[4]);
+}
+// 预生成音频查找：清洗文本→window.RU_AUDIO 映射(键=清洗后文本本身，避免依赖易错的前端 SHA-1)
+function _audioURL(text){
+  if(!window.RU_AUDIO) return null;
+  var c = cleanForAudio(text);
+  if(!c) return null;
+  return window.RU_AUDIO[c] || null;
+}
+// 播放单个预生成音频(返回 Promise)
+function _playAudio(url){
+  return new Promise(function(resolve, reject){
+    try{
+      var a = new Audio(url);
+      a.volume = 1;
+      a.addEventListener('ended', function(){ resolve(true); });
+      a.addEventListener('error', function(){ reject(new Error('audio error')); });
+      var p = a.play();
+      if(p && p.catch) p.catch(function(){ reject(new Error('play blocked')); });
+    }catch(e){ reject(e); }
+  });
+}
+// 顺序播放一组音频 URL(长句/文章逐句)
+function _playSeq(urls){
+  return urls.reduce(function(p, u){ return p.then(function(){ return _playAudio(u); }); }, Promise.resolve());
+}
+// 兜底发声(预生成音频缺失/不可用 → Web Speech → 在线词典音频)
+function _ttsFallback(text, lang){
+  if(window.speechSynthesis){
+    if(/micromessenger/i.test(navigator.userAgent || '')){
+      if(typeof toast==='function') toast('检测到微信内置浏览器，可能无法发音。请点右上角 ⋮ →「在浏览器中打开」后用系统浏览器发音。');
+    }
+    if(!_voicesReady) loadVoices();
+    _doSpeak(text, lang);
+    if(lang.slice(0,2).toLowerCase()==='ru' && !_ruVoice && !_voicesReady){
+      var once=function(){ speechSynthesis.removeEventListener('voiceschanged', once); loadVoices(); if(_ruVoice) _doSpeak(text, lang); };
+      speechSynthesis.addEventListener('voiceschanged', once, {once:true});
+    }
+  } else {
+    _fallbackAudio(text, lang);
+  }
+}
+// 统一发音入口：优先预生成音频(电脑/手机直接播 URL，无需本地 TTS 引擎)，缺失则回退
 function speak(text, lang){
-  if(!window.speechSynthesis){ return; }
-  // 微信 / 部分 WebView 的 Web Speech 常被禁用，给出可执行提示
-  if(/micromessenger/i.test(navigator.userAgent || '')){
-    if(typeof toast === 'function') toast('检测到微信内置浏览器，可能无法发音。请点右上角 ⋮ →「在浏览器中打开」后用系统浏览器发音。');
-  }
   lang = lang || 'ru-RU';
-  if(lang.slice(0,2).toLowerCase()==='ru'){ text = ttsClean(text); if(!text) return; }
-  if(!_voicesReady) loadVoices();                          // 点击时同步补拉(不脱离用户手势，iOS 友好)
-  _doSpeak(text, lang);                                    // 立即在手势内发声(不 cancel，确保出声)
-  // 若俄语音色此刻尚未就绪：等 voiceschanged 后用真正的俄语音色补读一次(主要惠及安卓首次点击)
-  if(lang.slice(0,2).toLowerCase()==='ru' && !_ruVoice && !_voicesReady){
-    const once = ()=>{ speechSynthesis.removeEventListener('voiceschanged', once); loadVoices(); if(_ruVoice) _doSpeak(text, lang); };
-    speechSynthesis.addEventListener('voiceschanged', once, {once:true});
+  var two = lang.slice(0,2).toLowerCase();
+  if(two === 'ru'){
+    text = cleanForAudio(text);
+    if(!text) return;
+    // 1) 预生成音频(两端通用，最可靠)
+    var url = _audioURL(text);
+    if(url){ _playAudio(url).catch(function(){ _ttsFallback(text, lang); }); return; }
+    // 2) 长文本：切句逐句尝试预生成音频
+    if(text.length > 50){
+      var segs = text.split(/[.!?\u2026]+/).map(cleanForAudio).filter(function(s){ return s && /[а-яА-ЯёЁ]/.test(s); });
+      var surls = segs.map(_audioURL).filter(Boolean);
+      if(surls.length){
+        _playSeq(surls).catch(function(){ _ttsFallback(text, lang); });
+        if(surls.length < segs.length) setTimeout(function(){ _ttsFallback(text, lang); }, surls.length*2500+300);
+        return;
+      }
+    }
   }
+  // 3) 兜底
+  _ttsFallback(text, lang);
 }
 function spk(text, label){ label = label||'🔊'; return '<span class="speak" data-act="speak" data-t="'+encodeURIComponent(text)+'">'+label+'</span>'; }
 function spkWord(text){ return '<span class="speak" data-act="speak" data-t="'+encodeURIComponent(text)+'">🔊</span>'; }
@@ -1404,5 +1483,14 @@ window.App = {
 /* 启动 */
 buildNav();
 go('overview');
+// 进入系统闸门：用户点击「进入系统」后隐藏遮罩并自动朗读欢迎语(老电脑/手机均可用预生成音频)
+(function(){
+  var btn = document.getElementById('enterBtn');
+  if(btn) btn.addEventListener('click', function(){
+    var g = document.getElementById('enterGate');
+    if(g) g.style.display = 'none';
+    try{ speak(WELCOME_RU); }catch(e){}
+  });
+})();
 
 })();
